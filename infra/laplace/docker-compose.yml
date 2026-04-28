@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: laplace-pg
+    environment:
+      POSTGRES_DB: lef
+      POSTGRES_USER: lef
+      POSTGRES_PASSWORD: lef
+    volumes:
+      - lef-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lef -d lef"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  fetcher:
+    image: sparanoid/laplace-event-fetcher:edge
+    container_name: laplace-fetcher
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ROOMS: "${ROOMS:-81516}"
+      DATABASE_URL: "postgresql://lef:lef@postgres:5432/lef"
+      WEBSOCKET_BRIDGE: "true"
+      PORT: "8080"
+      EVENTS_KEEP: "72"
+      LOGIN_SYNC_TOKEN: "${LOGIN_SYNC_TOKEN:-}"
+    ports:
+      - "9696:8080"
+    restart: unless-stopped
+
+volumes:
+  lef-pg:

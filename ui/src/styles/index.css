@@ -1,0 +1,43 @@
+@import "tailwindcss";
+
+@theme {
+  --color-overlay-bg: oklch(0.18 0.02 260 / 0.55);
+  --color-overlay-fg: oklch(0.98 0 0);
+  --color-overlay-muted: oklch(0.7 0.02 260);
+  --color-accent: oklch(0.78 0.18 60);
+  --color-gift: oklch(0.85 0.2 90);
+  --font-overlay: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+
+  --layout-margin: 28px;
+  --capture-width: 1440px;
+  --capture-height: calc(var(--capture-width) * 9 / 16);
+}
+
+.overlay-grid {
+  display: grid;
+  grid-template-columns: var(--capture-width) 1fr;
+  grid-template-rows: var(--capture-height) 1fr;
+  grid-template-areas:
+    "capture log"
+    "chat    log";
+  gap: var(--layout-margin);
+}
+
+html, body, #root {
+  background: transparent !important;
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-overlay);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  color: var(--color-overlay-fg);
+}
+
+::-webkit-scrollbar {
+  display: none;
+}
