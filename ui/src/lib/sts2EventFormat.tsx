@@ -633,6 +633,12 @@ function ThinkingBody({ meta }: PartProps) {
   const errors = Array.isArray(meta.errors)
     ? (meta.errors as ThinkingError[])
     : []
+  const transitions = arr<Record<string, unknown>>(meta.transitions)
+  const decisions = arr<Record<string, unknown>>(meta.decisions)
+  const combatPlan = meta.combatPlan as Record<string, unknown> | undefined
+  const floor = typeof meta.floor === 'number' ? meta.floor : null
+  const combatTurn =
+    typeof meta.combatTurn === 'number' ? meta.combatTurn : null
 
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -646,7 +652,34 @@ function ThinkingBody({ meta }: PartProps) {
 
   return (
     <div className="text-white/65">
-      <div>
+      {(decisions.length > 0 || combatPlan) && (
+        <div className="mb-2 text-[14px] space-y-2">
+          {decisions.map((d, i) => (
+            <div key={i}>{renderSts2Summary('decision', d)}</div>
+          ))}
+          {combatPlan && renderSts2Summary('combat_plan', combatPlan)}
+        </div>
+      )}
+      {transitions.length > 0 && (
+        <div className="mb-1.5 space-y-0.5 text-[13px]">
+          {transitions.map((t, i) => (
+            <div key={i}>{renderSts2Summary('transition', t)}</div>
+          ))}
+        </div>
+      )}
+      <div className={(decisions.length > 0 || combatPlan || transitions.length > 0) ? 'pt-2 border-t border-white/10' : ''}>
+        {floor != null && floor > 0 && (
+          <>
+            <span className="text-amber-300/80 tabular-nums">F{floor}</span>
+            <span className="text-white/40"> · </span>
+          </>
+        )}
+        {combatTurn != null && (
+          <>
+            <span className="text-rose-300/80 tabular-nums">T{combatTurn}</span>
+            <span className="text-white/40"> · </span>
+          </>
+        )}
         {model ? (
           <span className="font-mono text-blue-300">{model}</span>
         ) : (

@@ -7,18 +7,15 @@ interface LogState {
   totalTokens: number
   llmCallCount: number
   thinkingActiveId: string | null
+  lastThinkingId: string | null
   inCombat: boolean
+  lastFloor: number
+  lastCombatTurn: number | null
   ingest: (e: UnifiedEvent) => void
   clear: () => void
 }
 
 const MAX_ENTRIES = 500
-
-const VISIBLE_STS2_TYPES = new Set([
-  'combat_plan',
-  'transition',
-  'decision',
-])
 
 const STATS_STS2_TYPES = new Set([
   'llm_call',
@@ -27,10 +24,6 @@ const STATS_STS2_TYPES = new Set([
   'evolution_round',
 ])
 
-// Decision action names that are suppressed from the visible log because they
-// are turn-by-turn combat actions and would flood the panel. Other action
-// types (map choices, shop picks, event responses, etc.) still render even
-// while combat is active.
 const HIDDEN_DECISION_ACTIONS = new Set([
   'play_card',
   'end_turn',
@@ -50,13 +43,22 @@ const pushBounded = (entries: UnifiedEvent[], next: UnifiedEvent): UnifiedEvent[
   return updated
 }
 
+const patchEntry = (
+  entries: UnifiedEvent[],
+  id: string,
+  updater: (en: UnifiedEvent) => UnifiedEvent,
+): UnifiedEvent[] => entries.map(en => en.id === id ? updater(en) : en)
+
 export const useLogStore = create<LogState>(set => ({
   entries: [],
   modelName: '',
   totalTokens: 0,
   llmCallCount: 0,
   thinkingActiveId: null,
+  lastThinkingId: null,
   inCombat: false,
+  lastFloor: 0,
+  lastCombatTurn: null,
 
   ingest: e =>
     set(s => {
@@ -78,10 +80,44 @@ export const useLogStore = create<LogState>(set => ({
           }
         }
 
-        if (type === 'tool_preprocessing') {
-          if (s.thinkingActiveId) {
-            return { ...s, ...stats }
+        // Track floor + combat turn from `state` events so we can snapshot
+        // them onto the next thinking entry. The agent can also include
+        // these directly on tool_preprocessing — we prefer those if present.
+        if (type === 'state') {
+          const floor = numField(meta, 'floor')
+          const combat = meta.combat as Record<string, unknown> | null | undefined
+          const turn =
+            combat && typeof combat.round === 'number' ? combat.round : null
+          return {
+            ...s,
+            ...stats,
+            lastFloor: floor || s.lastFloor,
+            lastCombatTurn: turn,
           }
+        }
+
+        if (type === 'tool_preprocessing') {
+          // If a thinking entry is still "active" (no llm_request_end received),
+          // close it before creating the next one so it doesn't get stuck forever.
+          let entries = s.entries
+          if (s.thinkingActiveId) {
+            entries = patchEntry(entries, s.thinkingActiveId, en => ({
+              ...en,
+              meta: {
+                ...(en.meta ?? {}),
+                endedAt: e.timestamp,
+                durationMs:
+                  e.timestamp -
+                  (typeof en.meta?.startedAt === 'number'
+                    ? en.meta.startedAt
+                    : e.timestamp),
+              },
+            }))
+          }
+          const evFloor =
+            typeof meta.floor === 'number' ? meta.floor : null
+          const evTurn =
+            typeof meta.combat_round === 'number' ? meta.combat_round : null
           const thinkingEntry: UnifiedEvent = {
             id: `thinking-${e.id}`,
             source: 'sts2agent',
@@ -90,14 +126,17 @@ export const useLogStore = create<LogState>(set => ({
             meta: {
               eventType: 'thinking',
               startedAt: e.timestamp,
+              floor: evFloor ?? s.lastFloor,
+              combatTurn: evTurn ?? s.lastCombatTurn,
             },
             timestamp: e.timestamp,
           }
           return {
             ...s,
             ...stats,
-            entries: pushBounded(s.entries, thinkingEntry),
+            entries: pushBounded(entries, thinkingEntry),
             thinkingActiveId: thinkingEntry.id,
+            lastThinkingId: thinkingEntry.id,
           }
         }
 
@@ -105,11 +144,10 @@ export const useLogStore = create<LogState>(set => ({
           const id = s.thinkingActiveId
           const model = typeof meta.model === 'string' ? meta.model : ''
           if (id && model) {
-            const entries = s.entries.map(en =>
-              en.id === id
-                ? { ...en, meta: { ...(en.meta ?? {}), model } }
-                : en,
-            )
+            const entries = patchEntry(s.entries, id, en => ({
+              ...en,
+              meta: { ...(en.meta ?? {}), model },
+            }))
             return { ...s, ...stats, entries }
           }
           return { ...s, ...stats }
@@ -120,15 +158,12 @@ export const useLogStore = create<LogState>(set => ({
           if (!id) {
             return { ...s, ...stats }
           }
-          const status =
-            typeof meta.status === 'string' ? meta.status : 'ok'
-          const errorMsg =
-            typeof meta.error === 'string' ? meta.error : ''
+          const status = typeof meta.status === 'string' ? meta.status : 'ok'
+          const errorMsg = typeof meta.error === 'string' ? meta.error : ''
           const isError = status !== 'ok' || !!errorMsg
 
           if (isError) {
-            const entries = s.entries.map(en => {
-              if (en.id !== id) return en
+            const entries = patchEntry(s.entries, id, en => {
               const prev = (en.meta?.errors as
                 | Array<{ message: string; at: number }>
                 | undefined) ?? []
@@ -136,14 +171,9 @@ export const useLogStore = create<LogState>(set => ({
                 ...en,
                 meta: {
                   ...(en.meta ?? {}),
-                  // startedAt stays unchanged — the elapsed timer continues
-                  // accumulating across retries so total cost is preserved.
                   errors: [
                     ...prev,
-                    {
-                      message: errorMsg || `status=${status}`,
-                      at: e.timestamp,
-                    },
+                    { message: errorMsg || `status=${status}`, at: e.timestamp },
                   ],
                 },
               }
@@ -151,8 +181,7 @@ export const useLogStore = create<LogState>(set => ({
             return { ...s, ...stats, entries }
           }
 
-          const entries = s.entries.map(en => {
-            if (en.id !== id) return en
+          const entries = patchEntry(s.entries, id, en => {
             const startedAt =
               typeof en.meta?.startedAt === 'number' ? en.meta.startedAt : e.timestamp
             return {
@@ -167,22 +196,29 @@ export const useLogStore = create<LogState>(set => ({
           return { ...s, ...stats, entries, thinkingActiveId: null }
         }
 
+        // Track combat state
         let inCombat = s.inCombat
         if (type === 'transition') {
-          const transType =
-            typeof meta.type === 'string' ? meta.type : ''
+          const transType = typeof meta.type === 'string' ? meta.type : ''
           if (transType === 'combat_start') inCombat = true
           else if (transType === 'combat_end') inCombat = false
         }
-        // A combat_plan event is itself proof we're in combat — promote to true
-        // even if we missed the combat_start transition (e.g. on agent restart
-        // mid-combat, or if the transition emit was dropped).
-        if (type === 'combat_plan') {
-          inCombat = true
-        }
+        if (type === 'combat_plan') inCombat = true
 
-        if (!VISIBLE_STS2_TYPES.has(type)) {
-          return { ...s, ...stats, inCombat }
+        // Merge transition / decision / combat_plan into the last thinking entry
+        const lastId = s.lastThinkingId
+
+        if (type === 'transition') {
+          if (!lastId) return { ...s, inCombat }
+          const entries = patchEntry(s.entries, lastId, en => {
+            const prev =
+              (en.meta?.transitions as Array<Record<string, unknown>> | undefined) ?? []
+            return {
+              ...en,
+              meta: { ...(en.meta ?? {}), transitions: [...prev, meta] },
+            }
+          })
+          return { ...s, inCombat, entries }
         }
 
         if (type === 'decision') {
@@ -192,34 +228,36 @@ export const useLogStore = create<LogState>(set => ({
             const a = (actionDict as Record<string, unknown>).action
             if (typeof a === 'string') actionName = a
           }
-          if (HIDDEN_DECISION_ACTIONS.has(actionName)) {
-            return { ...s, ...stats, inCombat }
-          }
-          const reasoning =
-            typeof meta.reasoning === 'string' ? meta.reasoning : ''
-          if (!reasoning) {
-            return { ...s, ...stats, inCombat }
-          }
-          for (let i = s.entries.length - 1; i >= 0; i--) {
-            const prev = s.entries[i]
-            if (
-              prev?.source === 'sts2agent' &&
-              prev.meta?.eventType === 'decision'
-            ) {
-              if (prev.meta?.reasoning === reasoning) {
-                return { ...s, ...stats, inCombat }
-              }
-              break
+          if (HIDDEN_DECISION_ACTIONS.has(actionName)) return { ...s, inCombat }
+          const reasoning = typeof meta.reasoning === 'string' ? meta.reasoning : ''
+          if (!reasoning) return { ...s, inCombat }
+          if (!lastId) return { ...s, inCombat }
+          const entries = patchEntry(s.entries, lastId, en => {
+            const prev =
+              (en.meta?.decisions as Array<Record<string, unknown>> | undefined) ?? []
+            // Skip if the most recent decision has identical reasoning
+            const last = prev[prev.length - 1]
+            if (last && (last as Record<string, unknown>).reasoning === reasoning) {
+              return en
             }
-          }
+            return {
+              ...en,
+              meta: { ...(en.meta ?? {}), decisions: [...prev, meta] },
+            }
+          })
+          return { ...s, inCombat, entries }
         }
 
-        return {
-          ...s,
-          ...stats,
-          inCombat,
-          entries: pushBounded(s.entries, e),
+        if (type === 'combat_plan') {
+          if (!lastId) return { ...s, inCombat }
+          const entries = patchEntry(s.entries, lastId, en => ({
+            ...en,
+            meta: { ...(en.meta ?? {}), combatPlan: meta },
+          }))
+          return { ...s, inCombat, entries }
         }
+
+        return { ...s, ...stats, inCombat }
       }
 
       return { ...s, entries: pushBounded(s.entries, e) }
@@ -232,6 +270,9 @@ export const useLogStore = create<LogState>(set => ({
       totalTokens: 0,
       llmCallCount: 0,
       thinkingActiveId: null,
+      lastThinkingId: null,
       inCombat: false,
+      lastFloor: 0,
+      lastCombatTurn: null,
     }),
 }))

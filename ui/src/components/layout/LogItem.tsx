@@ -63,18 +63,21 @@ export function LogHeader({ entry, count }: HeaderProps) {
   const isThinking =
     isSts2(entry) && eventTypeOf(entry) === 'thinking'
   const thinkingActive = isThinking && entry.meta?.endedAt == null
+  const hideLabel = isThinking && !thinkingActive
 
   return (
     <div className="flex items-center gap-2 text-[13px]">
       <span className="font-mono text-white/35 tabular-nums">
         {formatTime(entry.timestamp)}
       </span>
-      <span
-        className="font-bold px-1.5 py-0.5 rounded uppercase tracking-wider text-[12px]"
-        style={{ color, backgroundColor: `${color}1f` }}
-      >
-        {label}
-      </span>
+      {!hideLabel && (
+        <span
+          className="font-bold px-1.5 py-0.5 rounded uppercase tracking-wider text-[12px]"
+          style={{ color, backgroundColor: `${color}1f` }}
+        >
+          {label}
+        </span>
+      )}
       {count && count > 1 && (
         <span className="text-white/50 tabular-nums text-[12px]">
           ×{count}
