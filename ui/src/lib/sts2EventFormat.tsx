@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { formatLatency, formatTokens, shortModel, truncate } from './formatters'
+import { renderParagraphs } from './inlineMarkup'
 
 export const STS2_EVENT_COLORS: Record<string, string> = {
   state: '#94a3b8',
@@ -238,9 +239,11 @@ export function renderSts2Summary(
 
 
     case 'transition': {
-      const t = getStr(meta, 'type')
-      const summary = getStr(meta, 'summary')
-      const stateType = getStr(meta, 'state_type')
+      const t = getStr(meta, 'type_zh') || getStr(meta, 'type')
+      const summary =
+        getStr(meta, 'summary_zh') || getStr(meta, 'summary')
+      const stateType =
+        getStr(meta, 'state_type_zh') || getStr(meta, 'state_type')
       return (
         <span className="text-purple-300">
           {t}
@@ -339,9 +342,17 @@ export function renderSts2Summary(
     }
 
     case 'decision': {
+      const marked = getStr(meta, 'text_marked')
+      if (marked) {
+        return (
+          <div className="text-white/85">{renderParagraphs(marked)}</div>
+        )
+      }
       const reasoning =
         getStr(meta, 'reasoning_zh') || getStr(meta, 'reasoning')
-      return <span className="text-white/85">{reasoning}</span>
+      return (
+        <div className="text-white/85">{renderParagraphs(reasoning)}</div>
+      )
     }
 
     case 'run_start': {
@@ -529,20 +540,42 @@ const arr = <T,>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : [])
 
 interface PlanItemLike {
   type?: unknown
+  type_zh?: unknown
   card?: unknown
+  card_zh?: unknown
   target?: unknown
 }
 
+// Card / relic display colors. All cards share one color; upgraded cards
+// (display name ends with "+") switch to green so the upgrade signal is
+// visible at a glance. Relics get their own distinct color.
+export const CARD_COLOR = 'text-amber-200'
+export const CARD_UPGRADED_COLOR = 'text-emerald-300'
+export const RELIC_COLOR = 'text-teal-300'
+
+export const itemColor = (type: unknown, name: unknown): string => {
+  const t = typeof type === 'string' ? type.toLowerCase() : ''
+  if (t === 'relic') return RELIC_COLOR
+  const upgraded = typeof name === 'string' && name.endsWith('+')
+  return upgraded ? CARD_UPGRADED_COLOR : CARD_COLOR
+}
+
 function CombatPlanBlock({ meta }: PartProps) {
+  const reasoningMarked = str(meta.reasoning_marked)
   const reasoning = str(meta.reasoning_zh) || str(meta.reasoning)
   const items = arr<PlanItemLike>(meta.items)
   const endTurn = !!meta.end_turn
 
+  const isZh =
+    items.some(it => !!str(it.card_zh) || !!str(it.type_zh))
+
   return (
     <div className="leading-snug">
-      {reasoning && (
-        <div className="text-white/75 italic border-l-2 border-cyan-400/40 pl-2 mb-3">
-          {reasoning}
+      {(reasoningMarked || reasoning) && (
+        <div className="text-white/85 mb-3">
+          {reasoningMarked
+            ? renderParagraphs(reasoningMarked)
+            : renderParagraphs(reasoning)}
         </div>
       )}
       <div className="space-y-0.5 font-mono">
@@ -550,18 +583,22 @@ function CombatPlanBlock({ meta }: PartProps) {
           <div className="text-white/40">no actions queued</div>
         )}
         {items.map((it, i) => {
-          const type = str(it.type).toUpperCase()
-          const card = str(it.card)
+          const rawType = str(it.type)
+          const type = str(it.type_zh) || rawType.toUpperCase()
+          const card = str(it.card_zh) || str(it.card)
           const target = it.target
+          const cardColor = itemColor(it.type, card)
           return (
             <div key={i} className="text-white/85">
               <span className="text-white/35 mr-2 inline-block w-5 text-right">
                 {i + 1}.
               </span>
               <span className="text-cyan-300 font-bold mr-2">{type}</span>
-              <span className="text-white">{card}</span>
+              <span className={cardColor}>{card}</span>
               {target != null && target !== '' && (
-                <span className="text-white/55"> → e{String(target)}</span>
+                <span className="text-white/55">
+                  {isZh ? ` → 目标 ${String(target)}` : ` → e${String(target)}`}
+                </span>
               )}
             </div>
           )
@@ -571,7 +608,7 @@ function CombatPlanBlock({ meta }: PartProps) {
             <span className="text-white/35 mr-2 inline-block w-5 text-right">
               →
             </span>
-            END TURN
+            {isZh ? '结束回合' : 'END TURN'}
           </div>
         )}
       </div>
@@ -581,6 +618,11 @@ function CombatPlanBlock({ meta }: PartProps) {
 
 // ───────── Thinking body ──────────────────────────────────────────────────
 
+interface ThinkingError {
+  message: string
+  at: number
+}
+
 function ThinkingBody({ meta }: PartProps) {
   const startedAt =
     typeof meta.startedAt === 'number' ? meta.startedAt : 0
@@ -588,7 +630,9 @@ function ThinkingBody({ meta }: PartProps) {
     typeof meta.endedAt === 'number' ? meta.endedAt : null
   const completed = endedAt != null
   const model = str(meta.model)
-  const lastError = str(meta.lastError)
+  const errors = Array.isArray(meta.errors)
+    ? (meta.errors as ThinkingError[])
+    : []
 
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -603,18 +647,29 @@ function ThinkingBody({ meta }: PartProps) {
   return (
     <div className="text-white/65">
       <div>
-        {model && (
+        {model ? (
           <span className="font-mono text-blue-300">{model}</span>
+        ) : (
+          <span className="text-white/55">Preprocessing</span>
         )}
-        {model && <span className="text-white/40"> · </span>}
+        <span className="text-white/40"> · </span>
         <span className="text-white/40 tabular-nums">{elapsed}s</span>
       </div>
-      {lastError && !completed && (
-        <div className="text-rose-400 mt-0.5">
-          {truncate(lastError, 120)}{' '}
-          <span className="text-rose-300/60">· retrying</span>
-        </div>
-      )}
+      {errors.map((err, i) => {
+        const isLatest = i === errors.length - 1
+        const retrying = !completed && isLatest
+        const dt = ((err.at - startedAt) / 1000).toFixed(1)
+        return (
+          <div key={i} className="text-rose-400 mt-1">
+            {truncate(err.message, 120)}
+            {retrying && (
+              <span className="text-rose-300/60"> · retrying</span>
+            )}
+            <span className="text-rose-300/60"> · </span>
+            <span className="text-rose-300/60 tabular-nums">{dt}s</span>
+          </div>
+        )
+      })}
     </div>
   )
 }

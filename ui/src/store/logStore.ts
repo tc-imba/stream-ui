@@ -27,6 +27,16 @@ const STATS_STS2_TYPES = new Set([
   'evolution_round',
 ])
 
+// Decision action names that are suppressed from the visible log because they
+// are turn-by-turn combat actions and would flood the panel. Other action
+// types (map choices, shop picks, event responses, etc.) still render even
+// while combat is active.
+const HIDDEN_DECISION_ACTIONS = new Set([
+  'play_card',
+  'end_turn',
+  'use_potion',
+])
+
 const numField = (meta: Record<string, unknown>, key: string): number => {
   const v = meta[key]
   return typeof v === 'number' ? v : 0
@@ -119,12 +129,22 @@ export const useLogStore = create<LogState>(set => ({
           if (isError) {
             const entries = s.entries.map(en => {
               if (en.id !== id) return en
+              const prev = (en.meta?.errors as
+                | Array<{ message: string; at: number }>
+                | undefined) ?? []
               return {
                 ...en,
                 meta: {
                   ...(en.meta ?? {}),
-                  startedAt: e.timestamp,
-                  lastError: errorMsg || `status=${status}`,
+                  // startedAt stays unchanged — the elapsed timer continues
+                  // accumulating across retries so total cost is preserved.
+                  errors: [
+                    ...prev,
+                    {
+                      message: errorMsg || `status=${status}`,
+                      at: e.timestamp,
+                    },
+                  ],
                 },
               }
             })
@@ -154,13 +174,25 @@ export const useLogStore = create<LogState>(set => ({
           if (transType === 'combat_start') inCombat = true
           else if (transType === 'combat_end') inCombat = false
         }
+        // A combat_plan event is itself proof we're in combat — promote to true
+        // even if we missed the combat_start transition (e.g. on agent restart
+        // mid-combat, or if the transition emit was dropped).
+        if (type === 'combat_plan') {
+          inCombat = true
+        }
 
         if (!VISIBLE_STS2_TYPES.has(type)) {
           return { ...s, ...stats, inCombat }
         }
 
         if (type === 'decision') {
-          if (inCombat) {
+          const actionDict = meta.action
+          let actionName = ''
+          if (actionDict && typeof actionDict === 'object') {
+            const a = (actionDict as Record<string, unknown>).action
+            if (typeof a === 'string') actionName = a
+          }
+          if (HIDDEN_DECISION_ACTIONS.has(actionName)) {
             return { ...s, ...stats, inCombat }
           }
           const reasoning =
