@@ -17,6 +17,7 @@ services:
 
   fetcher:
     image: sparanoid/laplace-event-fetcher:edge
+    platform: linux/amd64
     container_name: laplace-fetcher
     depends_on:
       postgres:
